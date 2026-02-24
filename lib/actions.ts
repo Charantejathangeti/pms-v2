@@ -1,186 +1,181 @@
-"use server";
+import { prisma } from "@/lib/prisma"
+import { revalidatePath } from "next/cache"
 
-import { prisma } from "@/lib/prisma";
-import { revalidatePath } from "next/cache";
-import { Prisma } from "@prisma/client";
-
-/* ===========================
-   MRN Generator
-=========================== */
+/* =========================================
+   GENERATE MRN
+========================================= */
 export async function generateMRN() {
-  const yr = new Date().getFullYear();
+  const year = new Date().getFullYear()
 
   const count = await prisma.patient.count({
     where: {
       mrn: {
-        startsWith: `MRN-${yr}-`,
+        startsWith: `MRN-${year}-`,
       },
     },
-  });
+  })
 
-  return `MRN-${yr}-${String(count + 1).padStart(4, "0")}`;
+  return `MRN-${year}-${String(count + 1).padStart(4, "0")}`
 }
 
-/* ===========================
-   Create Patient
-=========================== */
-export async function createPatient(
-  data: Omit<Prisma.PatientCreateInput, "mrn">
-) {
-  const mrn = await generateMRN();
+/* =========================================
+   CREATE PATIENT
+========================================= */
+export async function createPatient(data: any) {
+  const mrn = await generateMRN()
 
   const patient = await prisma.patient.create({
     data: {
       mrn,
       ...data,
     },
-  });
+  })
 
-  revalidatePath("/patients");
+  revalidatePath("/patients")
+  revalidatePath("/dashboard")
 
-  return { success: true, patient };
+  return patient
 }
 
-/* ===========================
-   Get All Patients
-=========================== */
+/* =========================================
+   GET ALL PATIENTS
+========================================= */
 export async function getAllPatients() {
   return prisma.patient.findMany({
     orderBy: { createdAt: "desc" },
     include: {
       records: {
-        orderBy: { visitDate: "desc" },
         take: 1,
+        orderBy: { createdAt: "desc" },
       },
     },
-  });
+  })
 }
 
-/* ===========================
-   Search Patients
-=========================== */
-export async function searchPatients(q: string) {
-  if (!q || q.length < 2) return [];
-
-  return prisma.patient.findMany({
-    where: {
-      OR: [
-        { fullName: { contains: q } },
-        { mrn: { contains: q } },
-        { phone: { contains: q } },
-      ],
-    },
-    take: 20,
-    orderBy: { fullName: "asc" },
-  });
-}
-
-/* ===========================
-   Get Patient By ID
-=========================== */
+/* =========================================
+   GET PATIENT BY ID
+========================================= */
 export async function getPatientById(id: string) {
   return prisma.patient.findUnique({
     where: { id },
     include: {
       records: {
-        orderBy: { visitDate: "desc" },
+        orderBy: { createdAt: "desc" },
       },
     },
-  });
+  })
 }
 
-/* ===========================
-   Create Medical Record
-=========================== */
-export async function createRecord(
-  data: Prisma.MedicalRecordCreateInput
-) {
+/* =========================================
+   CREATE RECORD
+========================================= */
+export async function createRecord(data: any) {
   const record = await prisma.medicalRecord.create({
-    data,
-  });
+    data: {
+      ...data,
+      visitDate: data.visitDate || "",
+    },
+  })
 
-  // Safe revalidation
-  if (data.patient && "connect" in data.patient) {
-    revalidatePath(`/patients/${data.patient.connect.id}`);
-  }
+  revalidatePath("/patients")
+  revalidatePath("/dashboard")
 
-  return { success: true, record };
+  return record
 }
 
-/* ===========================
-   Delete Record
-=========================== */
-export async function deleteRecord(id: string, patientId: string) {
-  await prisma.medicalRecord.delete({
+/* =========================================
+   DELETE RECORD
+========================================= */
+export async function deleteRecord(id: string) {
+  const record = await prisma.medicalRecord.delete({
     where: { id },
-  });
+  })
 
-  revalidatePath(`/patients/${patientId}`);
+  revalidatePath("/patients")
+  revalidatePath("/dashboard")
 
-  return { success: true };
+  return record
 }
 
-/* ===========================
-   Dashboard Stats
-=========================== */
-export async function getDashboardStats() {
-  const today = new Date().toISOString().split("T")[0];
+/* =========================================
+   SEARCH PATIENTS
+========================================= */
+export async function searchPatients(query: string) {
+  if (!query) return []
 
-  const monthStart = new Date(
-    new Date().getFullYear(),
-    new Date().getMonth(),
+  return prisma.patient.findMany({
+    where: {
+      OR: [
+        { firstName: { contains: query, mode: "insensitive" } },
+        { lastName: { contains: query, mode: "insensitive" } },
+        { mrn: { contains: query, mode: "insensitive" } },
+        { phone: { contains: query, mode: "insensitive" } },
+      ],
+    },
+    take: 10,
+    orderBy: { createdAt: "desc" },
+  })
+}
+
+/* =========================================
+   DASHBOARD STATS
+========================================= */
+export async function getDashboardStats() {
+  const total = await prisma.patient.count()
+
+  const todayStart = new Date()
+  todayStart.setHours(0, 0, 0, 0)
+
+  const todayVisits = await prisma.medicalRecord.count({
+    where: {
+      createdAt: { gte: todayStart },
+    },
+  })
+
+  const firstDayOfMonth = new Date(
+    todayStart.getFullYear(),
+    todayStart.getMonth(),
     1
   )
-    .toISOString()
-    .split("T")[0];
 
-  const [total, records, recent, deptCounts] =
-    await Promise.all([
-      prisma.patient.count(),
+  const revenueAgg = await prisma.medicalRecord.aggregate({
+    _sum: { billingAmount: true },
+    where: {
+      createdAt: { gte: firstDayOfMonth },
+      billingStatus: "PAID",
+    },
+  })
 
-      prisma.medicalRecord.findMany({
-        select: {
-          visitDate: true,
-          billingAmount: true,
-          billingStatus: true,
-          department: true,
-        },
-      }),
+  const monthRevenue = revenueAgg._sum.billingAmount ?? 0
 
-      prisma.patient.findMany({
-        take: 6,
+  const pending = await prisma.medicalRecord.count({
+    where: { billingStatus: "PENDING" },
+  })
+
+  const recent = await prisma.patient.findMany({
+    take: 6,
+    orderBy: { createdAt: "desc" },
+    include: {
+      records: {
+        take: 1,
         orderBy: { createdAt: "desc" },
-        include: {
-          records: {
-            take: 1,
-            orderBy: { visitDate: "desc" },
-          },
-        },
-      }),
+      },
+    },
+  })
 
-      prisma.patient.groupBy({
-        by: ["department"],
-        _count: { id: true },
-        orderBy: { _count: { id: "desc" } },
-        take: 5,
-      }),
-    ]);
-
-  const todayVisits = records.filter(
-    (r) => r.visitDate === today
-  ).length;
-
-  const monthRevenue = records
-    .filter(
-      (r) =>
-        r.billingStatus === "PAID" &&
-        r.visitDate >= monthStart
-    )
-    .reduce((sum, r) => sum + r.billingAmount, 0);
-
-  const pending = records.filter(
-    (r) => r.billingStatus === "PENDING"
-  ).length;
+  // ✅ FIXED GROUP BY (Prisma Safe)
+  const deptCounts = await prisma.patient.groupBy({
+    by: ["department"],
+    _count: {
+      id: true,
+    },
+    orderBy: {
+      _count: {
+        id: "desc",
+      },
+    },
+    take: 5,
+  })
 
   return {
     total,
@@ -189,5 +184,5 @@ export async function getDashboardStats() {
     pending,
     recent,
     deptCounts,
-  };
+  }
 }
