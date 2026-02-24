@@ -25,7 +25,7 @@ export async function generateMRN() {
    Create Patient
 =========================== */
 export async function createPatient(
-  data: Prisma.PatientCreateInput
+  data: Omit<Prisma.PatientCreateInput, "mrn">
 ) {
   const mrn = await generateMRN();
 
@@ -99,7 +99,10 @@ export async function createRecord(
     data,
   });
 
-  revalidatePath(`/patients/${data.patient?.connect?.id}`);
+  // Safe revalidation
+  if (data.patient && "connect" in data.patient) {
+    revalidatePath(`/patients/${data.patient.connect.id}`);
+  }
 
   return { success: true, record };
 }
